@@ -116,6 +116,19 @@ def sync_embeddings(
             for chunk in chunks:
                 queue.append((doc.path, chunk.ordinal, chunk.text, chunk.breadcrumb))
 
+        # A note with an empty body yields no chunks, so its counter starts at
+        # zero and no batch ever decrements it. Left unmarked it would be
+        # re-processed on every run, and "all documents embedded" would never
+        # become true. Mark these up front instead.
+        empty = [
+            {"path": path, "content_hash": hashes[path]}
+            for path, count in outstanding.items()
+            if count == 0
+        ]
+        if empty:
+            session.execute_write(lambda tx, r=empty: tx.run(MARK_CHUNKED, rows=r))
+            report.documents_embedded += len(empty)
+
         batch_size = max(1, cfg.embed_batch)
         for start in range(0, len(queue), batch_size):
             batch = queue[start : start + batch_size]
