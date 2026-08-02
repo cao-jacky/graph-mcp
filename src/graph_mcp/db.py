@@ -106,21 +106,22 @@ def apply_schema(cfg: Settings | None = None) -> list[str]:
 
 
 def graph_stats(cfg: Settings | None = None) -> dict[str, int]:
+    # COUNT {} expressions rather than CALL {} subqueries: Neo4j 5.26 deprecates
+    # a CALL subquery without a variable scope clause, and the replacement
+    # syntax (`CALL () { ... }`) is not accepted by earlier 5.x. COUNT {} works
+    # across the range and keeps deprecation warnings off the MCP stderr.
     query = """
-    CALL {MATCH (d:Document) WHERE coalesce(d.stub, false) = false
-           RETURN count(d) AS documents}
-    CALL {MATCH (d:Document) WHERE d.stub = true RETURN count(d) AS stubs}
-    CALL {MATCH (c:Chunk) RETURN count(c) AS chunks}
-    CALL {MATCH (c:Chunk) WHERE c.embedding IS NOT NULL
-           RETURN count(c) AS embedded_chunks}
-    CALL {MATCH (t:Tag) RETURN count(t) AS tags}
-    CALL {MATCH (e:Entity) RETURN count(e) AS entities}
-    CALL {MATCH ()-[r:LINKS_TO]->() RETURN count(r) AS links_to}
-    CALL {MATCH ()-[r:TAGGED]->() RETURN count(r) AS tagged}
-    CALL {MATCH ()-[r:MENTIONS]->() RETURN count(r) AS mentions}
-    CALL {MATCH ()-[r:RELATES_TO]->() RETURN count(r) AS relates_to}
-    RETURN documents, stubs, chunks, embedded_chunks, tags, entities,
-           links_to, tagged, mentions, relates_to
+    RETURN
+      COUNT { MATCH (d:Document) WHERE coalesce(d.stub, false) = false } AS documents,
+      COUNT { MATCH (d:Document) WHERE d.stub = true }                   AS stubs,
+      COUNT { MATCH (c:Chunk) }                                          AS chunks,
+      COUNT { MATCH (c:Chunk) WHERE c.embedding IS NOT NULL }            AS embedded_chunks,
+      COUNT { MATCH (t:Tag) }                                            AS tags,
+      COUNT { MATCH (e:Entity) }                                         AS entities,
+      COUNT { MATCH ()-[r:LINKS_TO]->() }                                AS links_to,
+      COUNT { MATCH ()-[r:TAGGED]->() }                                  AS tagged,
+      COUNT { MATCH ()-[r:MENTIONS]->() }                                AS mentions,
+      COUNT { MATCH ()-[r:RELATES_TO]->() }                              AS relates_to
     """
     with driver_session(cfg) as session:
         record = session.run(query).single()
