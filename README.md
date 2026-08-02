@@ -162,17 +162,23 @@ Join the client's network from this side, so the client's container is never
 modified or recreated:
 
 ```bash
-# find it
+# find it — this is the DOCKER network name, project-prefixed. It is not the
+# key used in the client's compose file: `networks: {hermes-net: ...}` under
+# project `hermes` becomes `hermes_hermes-net`.
 docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' hermes
-# e.g. hermes_hermes-net
 
-# then, for this stack
-AGENT_NETWORK=hermes_hermes-net docker compose --profile server up -d
+# then, for this stack — BOTH variables are needed
+AGENT_NETWORK=hermes_hermes-net AGENT_NETWORK_EXTERNAL=true \
+  docker compose --profile server up -d
 ```
 
+`AGENT_NETWORK_EXTERNAL=true` says "join this, don't create it". With only
+`AGENT_NETWORK` set, Compose would try to create a network of that name and
+the client would not be on it.
+
 `docker network connect hermes_hermes-net graph-mcp` does the same thing
-immediately, but is lost when the container is recreated; `AGENT_NETWORK`
-survives redeploys.
+immediately, but is lost when the container is recreated; the variables
+survive redeploys.
 
 Once shared, the client reaches `http://graph-mcp:8000/mcp` over that network
 and **no port needs publishing at all** — leave `MCP_BIND_ADDR` alone.

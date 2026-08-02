@@ -90,6 +90,11 @@ services:
     profiles: ["server"]
     build: .
     image: graph-mcp:local
+    # This image is built here, not published to a registry. Without an
+    # explicit build policy, `docker compose pull` — which Portainer runs
+    # before deploying a stack — tries to fetch `graph-mcp:local` from Docker
+    # Hub and fails with "pull access denied".
+    pull_policy: build
     container_name: graph-mcp
     restart: unless-stopped
     depends_on:
@@ -135,13 +140,24 @@ services:
 
 networks:
   default:
-  # The client's existing network, joined from this side so the client's
-  # container never has to be modified or recreated. Find it with:
+  # The MCP client's network. To join one that already exists — so the
+  # client's container is never modified or recreated — set BOTH:
+  #
+  #   AGENT_NETWORK=hermes_hermes-net
+  #   AGENT_NETWORK_EXTERNAL=true
+  #
+  # Find the name with:
   #   docker inspect -f '{{range $$k,$$v := .NetworkSettings.Networks}}{{$$k}} {{end}}' <client>
-  # Defaults to the stack's own network, which makes this a no-op until set.
+  # Note it is the *Docker* network name (project-prefixed), not the key used
+  # in the client's compose file.
+  #
+  # Left unset, the stack creates its own private network and nothing else
+  # joins it. It must not default to `bridge`: the default bridge is not
+  # user-defined, and attaching to it fails with "network-scoped aliases are
+  # only supported for user-defined networks".
   agent:
-    external: true
-    name: ${AGENT_NETWORK:-bridge}
+    name: ${AGENT_NETWORK:-graph-mcp_agent}
+    external: ${AGENT_NETWORK_EXTERNAL:-false}
 
 volumes:
   neo4j-data:
