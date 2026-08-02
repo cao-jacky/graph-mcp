@@ -180,10 +180,26 @@ the client would not be on it.
 immediately, but is lost when the container is recreated; the variables
 survive redeploys.
 
-Once shared, the client reaches `http://graph-mcp:8000/mcp` over that network
-and **no port needs publishing at all** — leave `MCP_BIND_ADDR` alone.
-Publish it on a private interface only if the client is on another host, the
-same rule as Bolt.
+Once shared, the client reaches `http://graph-mcp:8000/mcp` over that network.
+**No host port is published**, deliberately: it would only invite collisions
+(port 8000 is a popular default) without being needed.
+
+If a client on *another host* needs it, add an override file and bind it to a
+private interface — never `0.0.0.0`, which would expose corpus snippets to
+every network the host can reach:
+
+```yaml
+# docker-compose.publish.yml
+services:
+  graph-mcp:
+    ports:
+      - "10.0.0.5:8000:8000"     # a VPN/LAN address
+```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.publish.yml \
+  --profile server up -d
+```
 
 ## Build plan and validation gates
 

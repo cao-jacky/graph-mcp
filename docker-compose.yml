@@ -122,10 +122,11 @@ services:
       GRAPH_MCP_EMBED_DIM: "${EMBED_DIM:-4096}"
       # Stage gate: leave unset until the semantic pass has been validated.
       GRAPH_MCP_SEMANTIC_TOOLS: "${GRAPH_MCP_SEMANTIC_TOOLS:-}"
-    ports:
-      # Leave unpublished if the client is a sibling container — it can reach
-      # http://graph-mcp:8000/mcp over the compose network without this.
-      - "${MCP_BIND_ADDR:-127.0.0.1}:8000:8000"
+    # No published port on purpose. A client container on the shared network
+    # reaches http://graph-mcp:8000/mcp directly, so publishing only invites
+    # host port collisions and widens exposure. If a client on another host
+    # genuinely needs it, add an override file — see the README — and bind it
+    # to a private interface, never 0.0.0.0.
     security_opt:
       - no-new-privileges:true
     mem_limit: ${MCP_MEM_LIMIT:-1g}
