@@ -65,6 +65,60 @@ services:
     # swap instead of OOM-killing inside its own cgroup.
     memswap_limit: ${NEO4J_MEM_LIMIT:-4g}
 
+  # Optional: graph-mcp over HTTP, for MCP clients that cannot spawn a local
+  # stdio process (Hermes Agent in a sibling container, for example). Desktop
+  # clients should keep using stdio and do not need this.
+  #
+  #   docker compose --profile server up -d
+  #
+  # Required alongside the Neo4j variables:
+  #   GRAPH_MCP_AUTH_TOKEN   shared bearer token (`openssl rand -hex 32`)
+  #   KB_ROOT                host path of the Knowledge/ corpus
+  #   EMBED_BASE_URL         embedding endpoint reachable FROM this container
+  #                          — not 127.0.0.1 unless the model runs here too
+  graph-mcp:
+    profiles: ["server"]
+    build: .
+    image: graph-mcp:local
+    container_name: graph-mcp
+    restart: unless-stopped
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      GRAPH_MCP_TRANSPORT: streamable-http
+      GRAPH_MCP_HTTP_HOST: 0.0.0.0
+      GRAPH_MCP_HTTP_PORT: 8000
+      # Deliberately NOT marked required with `:?`. Compose interpolates the
+      # whole file before profiles are applied, so a required variable here
+      # would break `docker compose up` for the default (neo4j-only) stack.
+      # The server refuses to start without a token instead.
+      GRAPH_MCP_AUTH_TOKEN: "${GRAPH_MCP_AUTH_TOKEN:-}"
+      # Host header allowlist for the SDK's DNS-rebinding protection. Empty
+      # disables the check; `*` is not a wildcard, see the README.
+      GRAPH_MCP_ALLOWED_HOSTS: "${GRAPH_MCP_ALLOWED_HOSTS:-}"
+      # Reached over the compose network, so no port needs publishing.
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-}"
+      NEO4J_DATABASE: neo4j
+      GRAPH_MCP_EMBED_BASE_URL: "${EMBED_BASE_URL:-http://127.0.0.1:1234/v1}"
+      GRAPH_MCP_EMBED_MODEL: "${EMBED_MODEL:-text-embedding-qwen3-embedding-8b}"
+      GRAPH_MCP_EMBED_DIM: "${EMBED_DIM:-4096}"
+      # Stage gate: leave unset until the semantic pass has been validated.
+      GRAPH_MCP_SEMANTIC_TOOLS: "${GRAPH_MCP_SEMANTIC_TOOLS:-}"
+    volumes:
+      # Read-only: this service never writes to the corpus.
+      - "${KB_ROOT:-./Knowledge}:/vault/Knowledge:ro"
+    ports:
+      # Leave unpublished if the client is a sibling container — it can reach
+      # http://graph-mcp:8000/mcp over the compose network without this.
+      - "${MCP_BIND_ADDR:-127.0.0.1}:8000:8000"
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${MCP_MEM_LIMIT:-1g}
+    memswap_limit: ${MCP_MEM_LIMIT:-1g}
+
 volumes:
   neo4j-data:
   neo4j-logs:

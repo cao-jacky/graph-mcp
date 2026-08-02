@@ -91,6 +91,70 @@ claude mcp add --scope user graph \
   -- uv run --directory /path/to/graph-mcp graph-mcp
 ```
 
+## Serving over HTTP
+
+Desktop MCP clients spawn `graph-mcp` as a local stdio process and need
+nothing here. HTTP is for clients that *cannot* spawn a local process — an
+agent running in another container or on another host.
+
+A container running the stdio entrypoint has nothing attached to its stdin and
+will simply block, so the image sets `GRAPH_MCP_TRANSPORT=streamable-http`.
+
+```bash
+export GRAPH_MCP_AUTH_TOKEN=$(openssl rand -hex 32)
+export KB_ROOT=/path/to/your/Knowledge
+export EMBED_BASE_URL=http://<host-reachable-from-the-container>:1234/v1
+docker compose --profile server up -d
+```
+
+`GRAPH_MCP_AUTH_TOKEN` is **required** for HTTP — the server refuses to start
+without it rather than serving the corpus unauthenticated. Every request must
+carry `Authorization: Bearer <token>`; anything else gets a 401.
+
+Note `EMBED_BASE_URL` must be reachable *from inside the container*.
+`127.0.0.1` refers to the container itself, so unless the embedding model runs
+there too, use the host's LAN/VPN address.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `GRAPH_MCP_TRANSPORT` | `stdio` | `stdio` or `streamable-http` |
+| `GRAPH_MCP_HTTP_HOST` / `_PORT` / `_PATH` | `127.0.0.1` / `8000` / `/mcp` | Listen address and mount path |
+| `GRAPH_MCP_AUTH_TOKEN` | — | Required bearer token for HTTP |
+| `GRAPH_MCP_ALLOWED_HOSTS` | unset | Comma-separated `Host` allowlist, e.g. `graph-mcp:8000,10.0.0.5:*` |
+
+On `GRAPH_MCP_ALLOWED_HOSTS`: the SDK can reject unrecognised `Host` headers to
+block DNS rebinding, but its allowlist matches **exactly** or on a `host:*`
+port pattern — `*` alone is not a wildcard and would reject everything. DNS
+rebinding is a browser attack, MCP clients are not browsers, and the bearer
+token already gates every request, so the check is disabled unless you set an
+allowlist.
+
+### Registering with Hermes Agent
+
+Hermes has two unrelated extension surfaces, and this is the MCP one, not a
+native plugin: a repo without `plugin.yaml`/`__init__.py` is a valid MCP server
+but *not* a Hermes plugin, and `hermes plugins install` will say so. Add to
+`~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  graph:
+    url: "http://graph-mcp:8000/mcp"        # or http://<host>:8000/mcp
+    headers:
+      Authorization: "Bearer ${GRAPH_MCP_AUTH_TOKEN}"
+```
+
+`${VAR}` resolves from `~/.hermes/.env`, so put the token there and keep it out
+of the config file and out of any notes directory that syncs to a git remote.
+
+Tools surface to the agent prefixed by server name — `mcp_graph_semantic_search`,
+`mcp_graph_documents_by_tag`, and so on.
+
+If Hermes runs in a sibling container on the same Docker network, it can reach
+`http://graph-mcp:8000/mcp` directly and the port needs no publishing at all —
+leave `MCP_BIND_ADDR` alone. Otherwise publish it on a private interface, the
+same rule as Bolt.
+
 ## Build plan and validation gates
 
 Each stage has a gate. **Don't start the next stage until the current one's

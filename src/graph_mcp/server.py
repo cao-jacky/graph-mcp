@@ -12,6 +12,7 @@ so they cannot be called before Stage 3 has populated the edges they traverse.
 
 from __future__ import annotations
 
+from hmac import compare_digest
 from typing import Any
 
 from mcp.server.mcpserver import MCPServer
@@ -290,8 +291,97 @@ if settings.semantic_tools_enabled:
         return _fmt(rows, f"No recent documents mentioning {entity!r}.")
 
 
+class BearerAuthMiddleware:
+    """Reject requests without the shared bearer token.
+
+    An HTTP MCP endpoint is an inbound, prompt-injectable control surface, and
+    `semantic_search` will return snippets of any note in the corpus to anyone
+    who can reach it. Network placement alone is not treated as sufficient.
+    """
+
+    def __init__(self, app, token: str) -> None:
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        provided = headers.get("authorization", "")
+        expected = f"Bearer {self.token}"
+        # compare_digest avoids leaking the token through timing.
+        if not compare_digest(provided, expected):
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"www-authenticate", b'Bearer realm="graph-mcp"'),
+                ],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b'{"error":"unauthorized"}',
+            })
+            return
+        await self.app(scope, receive, send)
+
+
+def _run_http() -> None:
+    import uvicorn
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    if not settings.auth_token:
+        raise SystemExit(
+            "GRAPH_MCP_AUTH_TOKEN is required for HTTP transport. Generate one "
+            "with `openssl rand -hex 32`. Refusing to serve the corpus "
+            "unauthenticated."
+        )
+
+    # The SDK blocks DNS rebinding by rejecting unrecognised Host headers.
+    # Its allowlist matches exactly, or on a `host:*` port pattern — "*" alone
+    # is NOT a wildcard and would reject every request.
+    #
+    # DNS rebinding is a browser attack: it tricks a *browser* into resolving
+    # an attacker domain to this address. MCP clients are not browsers, and the
+    # bearer token already gates every request, so with no allowlist configured
+    # the protection is switched off rather than left silently rejecting
+    # everything. Set GRAPH_MCP_ALLOWED_HOSTS to re-enable it, e.g.
+    # "graph-mcp:8000,10.0.0.5:*".
+    named = [h for h in settings.allowed_hosts if h != "*"]
+    if named:
+        security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=named,
+            allowed_origins=named,
+        )
+    else:
+        security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    app = mcp.streamable_http_app(
+        streamable_http_path=settings.http_path,
+        transport_security=security,
+        host=settings.http_host,
+    )
+    uvicorn.run(
+        BearerAuthMiddleware(app, settings.auth_token),
+        host=settings.http_host,
+        port=settings.http_port,
+        log_level="info",
+    )
+
+
 def main() -> None:
-    mcp.run()
+    if settings.transport in ("streamable-http", "http"):
+        _run_http()
+    elif settings.transport == "stdio":
+        mcp.run()
+    else:
+        raise SystemExit(
+            f"Unknown GRAPH_MCP_TRANSPORT: {settings.transport!r}. "
+            "Use 'stdio' or 'streamable-http'."
+        )
 
 
 if __name__ == "__main__":

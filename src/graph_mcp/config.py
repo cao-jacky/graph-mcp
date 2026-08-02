@@ -45,6 +45,13 @@ class Settings:
 
     semantic_tools_enabled: bool
 
+    transport: str
+    http_host: str
+    http_port: int
+    http_path: str
+    auth_token: str
+    allowed_hosts: tuple[str, ...]
+
     @classmethod
     def from_env(cls) -> "Settings":
         # KNOWLEDGE_MCP_ROOT is honoured so graph-mcp indexes exactly the corpus
@@ -84,6 +91,19 @@ class Settings:
             # Stage gate: the relationship-aware tools stay hidden until the
             # semantic pass has actually populated RELATES_TO/MENTIONS edges.
             semantic_tools_enabled=_env_flag("GRAPH_MCP_SEMANTIC_TOOLS", False),
+            # stdio stays the default: it is what MCP clients spawn directly.
+            # streamable-http is for running as a shared service other hosts
+            # or containers connect to.
+            transport=os.environ.get("GRAPH_MCP_TRANSPORT", "stdio").strip(),
+            http_host=os.environ.get("GRAPH_MCP_HTTP_HOST", "127.0.0.1"),
+            http_port=int(os.environ.get("GRAPH_MCP_HTTP_PORT", "8000")),
+            http_path=os.environ.get("GRAPH_MCP_HTTP_PATH", "/mcp"),
+            auth_token=os.environ.get("GRAPH_MCP_AUTH_TOKEN", ""),
+            allowed_hosts=tuple(
+                h.strip()
+                for h in os.environ.get("GRAPH_MCP_ALLOWED_HOSTS", "").split(",")
+                if h.strip()
+            ),
         )
 
 
