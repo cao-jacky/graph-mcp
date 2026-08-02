@@ -250,6 +250,71 @@ Discovered by running against the real 277-note corpus; the tests in
 - **Short sections are packed together.** One chunk per heading gave 4024
   chunks averaging 90 words; packing yields 1408 averaging 258.
 
+## Troubleshooting
+
+Everything here was hit during a real deployment, in this order.
+
+### `Could not perform discovery. No routing servers available`
+
+You are connecting with the `neo4j://` scheme, which performs cluster routing
+discovery that a single instance does not offer. Use **`bolt://`** — in the
+Browser's connect dialog, in `NEO4J_URI`, everywhere. `neo4j://` is only for
+clusters and Aura.
+
+### `AuthError` after setting `NEO4J_USER`, or an unknown-database error
+
+Neo4j **Community Edition has exactly one user and one database**, both named
+`neo4j`. `CREATE USER` and `CREATE DATABASE` are Enterprise features, and
+`SHOW DATABASES` returns only `neo4j` and `system`. The compose file's
+`NEO4J_AUTH` creates `neo4j/<password>`; leave `NEO4J_USER` and
+`NEO4J_DATABASE` at their defaults.
+
+If you want an isolated graph, run a second container with its own volume —
+that is the Community-edition equivalent of a second database.
+
+### Bolt works but the Browser doesn't (or vice versa)
+
+`BOLT_BIND_ADDR` and `BROWSER_BIND_ADDR` are independent, and default to
+`127.0.0.1` separately. Publishing one does not publish the other.
+
+This matters for SSH tunnels: `-L 7687:127.0.0.1:7687` resolves `127.0.0.1`
+**on the server**, so it only works if that port is published on the server's
+loopback. If you set `BOLT_BIND_ADDR=10.0.0.5`, the tunnel must target that
+address:
+
+```bash
+ssh -L 7474:127.0.0.1:7474 -L 7687:10.0.0.5:7687 user@server
+```
+
+Or skip the tunnel for Bolt and point the Browser straight at
+`bolt://10.0.0.5:7687`, which is what `graph-sync` uses anyway.
+
+### The server restarts mid-`embed`, or Bolt writes fail with `ServiceUnavailable`
+
+The container is being OOM-killed, and `restart: unless-stopped` brings it
+back — so the port looks healthy afterwards and the cause is easy to miss.
+Confirm it:
+
+```cypher
+CALL dbms.queryJmx('java.lang:type=Runtime') YIELD attributes
+RETURN attributes.Uptime.value / 60000 AS uptime_minutes
+```
+
+An uptime far shorter than the container's age is the tell. Check heap too —
+if heap use is low, the JVM is fine and it is the *container* limit being hit,
+not the heap.
+
+`NEO4J_MEM_LIMIT` must cover heap + pagecache + JVM overhead (metaspace,
+direct buffers, thread stacks) **and** Lucene's off-heap allocations, which
+are substantial when building 4096-dim vector indexes. The 4g default with a
+2G heap and 1G pagecache is marginal for a full embedding pass; **8g is a
+safer floor for vector workloads**. `memswap_limit` equals `mem_limit` by
+design, so there is no swap cushion — the limit has to be genuinely
+sufficient.
+
+The `embed` stage watermarks each document as its last chunk lands, so a run
+killed this way keeps completed documents; just re-run it.
+
 ## Tests
 
 ```bash

@@ -20,8 +20,18 @@
 #                    address. Never 0.0.0.0: Bolt would then be exposed to
 #                    every network this host can reach.
 #   BROWSER_BIND_ADDR  interface for the Neo4j Browser UI. Defaults to
-#                    127.0.0.1; tunnel to it rather than publishing it.
+#                    127.0.0.1; tunnel to it rather than publishing it. Note
+#                    this is INDEPENDENT of BOLT_BIND_ADDR — setting one does
+#                    not publish the other, which matters when tunnelling.
+#   NEO4J_MEM_LIMIT  container memory ceiling, default 4g. Must cover heap +
+#                    pagecache + JVM overhead + Lucene's off-heap use. The
+#                    default is marginal for a full embedding pass over
+#                    4096-dim vectors; use 8g or more for vector workloads, or
+#                    the container is OOM-killed mid-run and restarted.
 #   NEO4J_IMAGE      defaults to neo4j:5-community.
+#
+# Community Edition has exactly one user and one database, both named `neo4j`.
+# Additional users/databases are Enterprise-only.
 
 services:
   neo4j:

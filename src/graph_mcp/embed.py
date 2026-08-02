@@ -48,6 +48,9 @@ SET c.embedding = row.embedding
 MERGE (d)-[:HAS_CHUNK]->(c)
 """
 
+# Applied as soon as a document's last chunk lands, not at the end of the run:
+# a full pass takes minutes over a network link, and an interrupted run must
+# keep the documents it already finished rather than discarding all of them.
 MARK_CHUNKED = """
 UNWIND $rows AS row
 MATCH (d:Document {path: row.path})
@@ -105,8 +108,12 @@ def sync_embeddings(
         # Chunks are embedded across document boundaries so every request
         # fills a whole batch, rather than sending a 1-chunk batch per note.
         queue: list[tuple[str, int, str, str]] = []
+        outstanding: dict[str, int] = {}
+        hashes = {d.path: d.content_hash for d in pending}
         for doc in pending:
-            for chunk in doc.chunks(cfg.chunk_words, cfg.chunk_overlap_words):
+            chunks = doc.chunks(cfg.chunk_words, cfg.chunk_overlap_words)
+            outstanding[doc.path] = len(chunks)
+            for chunk in chunks:
                 queue.append((doc.path, chunk.ordinal, chunk.text, chunk.breadcrumb))
 
         batch_size = max(1, cfg.embed_batch)
@@ -127,19 +134,31 @@ def sync_embeddings(
                 }
                 for (path, ordinal, text, crumb), vector in zip(batch, vectors)
             ]
-            session.run(WRITE_CHUNKS, rows=rows)
+            # execute_write retries transient failures (leader switch, dropped
+            # connection, restarted server) instead of losing the batch.
+            session.execute_write(lambda tx, r=rows: tx.run(WRITE_CHUNKS, rows=r))
             report.chunks_written += len(rows)
+
+            # Mark every document whose final chunk was in this batch.
+            finished = []
+            for path, _, _, _ in batch:
+                outstanding[path] -= 1
+                if outstanding[path] == 0:
+                    finished.append({"path": path, "content_hash": hashes[path]})
+            if finished:
+                session.execute_write(
+                    lambda tx, r=finished: tx.run(MARK_CHUNKED, rows=r)
+                )
+                report.documents_embedded += len(finished)
+
             if progress:
                 done = min(start + batch_size, len(queue))
                 print(
-                    f"  embedded {done}/{len(queue)} chunks", end="\r", flush=True
+                    f"  embedded {done}/{len(queue)} chunks "
+                    f"({report.documents_embedded}/{len(pending)} docs)",
+                    end="\r",
+                    flush=True,
                 )
-
-        session.run(
-            MARK_CHUNKED,
-            rows=[{"path": d.path, "content_hash": d.content_hash} for d in pending],
-        )
-        report.documents_embedded = len(pending)
 
     if progress:
         print(" " * 60, end="\r")
