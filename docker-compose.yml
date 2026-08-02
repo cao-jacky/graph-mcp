@@ -118,6 +118,23 @@ services:
       - no-new-privileges:true
     mem_limit: ${MCP_MEM_LIMIT:-1g}
     memswap_limit: ${MCP_MEM_LIMIT:-1g}
+    networks:
+      # `default` reaches Neo4j; `agent` is the network the MCP client lives
+      # on. Docker's embedded DNS only resolves service names within a shared
+      # user-defined network, so a client in another stack cannot resolve
+      # `graph-mcp` at all until both sides share one.
+      - default
+      - agent
+
+networks:
+  default:
+  # The client's existing network, joined from this side so the client's
+  # container never has to be modified or recreated. Find it with:
+  #   docker inspect -f '{{range $$k,$$v := .NetworkSettings.Networks}}{{$$k}} {{end}}' <client>
+  # Defaults to the stack's own network, which makes this a no-op until set.
+  agent:
+    external: true
+    name: ${AGENT_NETWORK:-bridge}
 
 volumes:
   neo4j-data:

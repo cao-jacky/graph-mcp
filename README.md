@@ -150,9 +150,33 @@ of the config file and out of any notes directory that syncs to a git remote.
 Tools surface to the agent prefixed by server name — `mcp_graph_semantic_search`,
 `mcp_graph_documents_by_tag`, and so on.
 
-If Hermes runs in a sibling container on the same Docker network, it can reach
-`http://graph-mcp:8000/mcp` directly and the port needs no publishing at all —
-leave `MCP_BIND_ADDR` alone. Otherwise publish it on a private interface, the
+#### The networks must be shared
+
+`[Errno -2] Name or service not known` means exactly this and nothing else:
+Docker's embedded DNS resolves service names **only within a shared
+user-defined network**. An agent deployed as its own stack is on its own
+network, so `graph-mcp` is not a resolvable name there — and the two could not
+reach each other by IP either.
+
+Join the client's network from this side, so the client's container is never
+modified or recreated:
+
+```bash
+# find it
+docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' hermes
+# e.g. hermes_hermes-net
+
+# then, for this stack
+AGENT_NETWORK=hermes_hermes-net docker compose --profile server up -d
+```
+
+`docker network connect hermes_hermes-net graph-mcp` does the same thing
+immediately, but is lost when the container is recreated; `AGENT_NETWORK`
+survives redeploys.
+
+Once shared, the client reaches `http://graph-mcp:8000/mcp` over that network
+and **no port needs publishing at all** — leave `MCP_BIND_ADDR` alone.
+Publish it on a private interface only if the client is on another host, the
 same rule as Bolt.
 
 ## Build plan and validation gates
