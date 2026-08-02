@@ -26,6 +26,16 @@ from .parse import Document, iter_documents
 
 ENTITY_TYPES = ("person", "project", "tool", "concept", "organization")
 
+# A closed vocabulary, enforced by the JSON schema rather than merely suggested
+# in the prompt. Left free-text, the model emits `part_of` and `is_part_of` for
+# the same relationship, plus invented types like `runs` — and each variant
+# becomes a distinct edge type in Neo4j, so a query for one silently misses the
+# others. The edge label *is* the answer for shortest_path, so this matters.
+RELATION_TYPES = (
+    "works_on", "depends_on", "part_of", "uses", "supersedes",
+    "contradicts", "created_by", "related_to",
+)
+
 SYSTEM_PROMPT = """\
 You extract a knowledge graph from personal technical notes.
 
@@ -36,8 +46,8 @@ Return ONLY a JSON object, no prose and no markdown fence, of the shape:
      "aliases": ["..."]}
   ],
   "relations": [
-    {"source": "...", "target": "...", "type": "works_on|depends_on|
-      supersedes|contradicts|part_of|uses|related_to", "confidence": 0.0-1.0}
+    {"source": "...", "target": "...", "type": "<one of the allowed types>",
+     "confidence": 0.0-1.0}
   ]
 }
 
@@ -45,6 +55,7 @@ Rules:
 - Extract only entities that genuinely matter to this note, not every noun.
 - Use the most canonical name you can (e.g. "Neo4j", not "the neo4j database").
 - `source` and `target` in relations MUST exactly match a `name` in entities.
+- `type` MUST be exactly one of: works_on, depends_on, part_of, uses, supersedes, contradicts, created_by, related_to.
 - Prefer a specific relation type over "related_to".
 - confidence reflects how explicitly the note states the relation.
 - If the note contains nothing worth extracting, return empty lists.\
@@ -179,7 +190,7 @@ EXTRACTION_SCHEMA = {
                 "properties": {
                     "source": {"type": "string"},
                     "target": {"type": "string"},
-                    "type": {"type": "string"},
+                    "type": {"type": "string", "enum": list(RELATION_TYPES)},
                     "confidence": {"type": "number"},
                 },
                 "required": ["source", "target", "type"],
@@ -208,6 +219,7 @@ class LLMClient:
     def __init__(self, cfg: Settings | None = None) -> None:
         self.cfg = cfg or settings
         self._format_index = 0
+        self._thinking_kwarg = cfg.llm_disable_thinking if cfg else settings.llm_disable_thinking
 
     def _request(self, prompt: str, response_format: dict | None) -> dict:
         payload: dict = {
@@ -217,9 +229,23 @@ class LLMClient:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0,
+            "max_tokens": self.cfg.llm_max_tokens,
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        if self._thinking_kwarg:
+            # Reasoning models emit a long chain of thought before the JSON.
+            # Extraction needs none of it: measured on a 28-word note, the model
+            # spent 2744 reasoning tokens to produce ~200 tokens of JSON — 93%
+            # of the work, and 103s instead of 14s.
+            #
+            # `reasoning_effort` is the parameter that actually works here.
+            # `chat_template_kwargs: {enable_thinking: false}` was accepted
+            # without error and silently ignored, and appending `/no_think` to
+            # the prompt made it worse — 4000 reasoning tokens instead of 2744.
+            # Verify any change here against `usage.completion_tokens_details.
+            # reasoning_tokens`, not against latency alone.
+            payload["reasoning_effort"] = "none"
         request = urllib.request.Request(
             f"{self.cfg.llm_base_url.rstrip('/')}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -228,7 +254,7 @@ class LLMClient:
                 "Authorization": f"Bearer {self.cfg.llm_api_key}",
             },
         )
-        with urllib.request.urlopen(request, timeout=self.cfg.embed_timeout) as response:
+        with urllib.request.urlopen(request, timeout=self.cfg.llm_timeout) as response:
             return json.load(response)
 
     def complete_json(self, prompt: str) -> dict:
@@ -238,11 +264,25 @@ class LLMClient:
             try:
                 body = self._request(prompt, RESPONSE_FORMATS[self._format_index])
             except urllib.error.HTTPError as exc:
+                if exc.code == 400 and self._thinking_kwarg:
+                    # Endpoint rejects chat_template_kwargs; drop it and retry
+                    # before blaming the response_format.
+                    self._thinking_kwarg = False
+                    continue
                 if exc.code == 400 and self._format_index < len(RESPONSE_FORMATS) - 1:
                     self._format_index += 1
                     continue
                 raise
-            return _parse_json(body["choices"][0]["message"]["content"])
+            choice = body["choices"][0]
+            # A truncated response is not parseable JSON, and the resulting
+            # error is opaque. Name the cause instead.
+            if choice.get("finish_reason") == "length":
+                raise ValueError(
+                    f"extraction hit max_tokens ({self.cfg.llm_max_tokens}); the "
+                    "model is over-generating. Raise GRAPH_MCP_LLM_MAX_TOKENS or "
+                    "use a model that does not emit reasoning traces."
+                )
+            return _parse_json(choice["message"]["content"])
         raise RuntimeError("No usable response_format for this endpoint")
 
 
@@ -348,9 +388,9 @@ def sync_semantic(
                         target = entity_key(str(raw.get("target", "")))
                         if not source or not target or source == target:
                             continue
-                        rtype = re.sub(
-                            r"[^a-z_]+", "_", str(raw.get("type", "related_to")).lower()
-                        ).strip("_") or "related_to"
+                        rtype = str(raw.get("type", "related_to")).strip().lower()
+                        if rtype not in RELATION_TYPES:
+                            rtype = "related_to"
                         try:
                             confidence = float(raw.get("confidence", 0.5))
                         except (TypeError, ValueError):

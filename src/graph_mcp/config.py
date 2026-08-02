@@ -38,6 +38,9 @@ class Settings:
     llm_base_url: str
     llm_model: str
     llm_api_key: str
+    llm_max_tokens: int
+    llm_timeout: int
+    llm_disable_thinking: bool
 
     chunk_words: int
     chunk_overlap_words: int
@@ -83,6 +86,16 @@ class Settings:
             ),
             llm_model=os.environ.get("GRAPH_MCP_LLM_MODEL", "qwen3.5-122b-a10b"),
             llm_api_key=os.environ.get("GRAPH_MCP_LLM_API_KEY", "lm-studio"),
+            # Extraction JSON for a normal note is a few hundred tokens. Without
+            # a cap, a reasoning model will happily spend thousands on a
+            # two-line note.
+            llm_max_tokens=int(os.environ.get("GRAPH_MCP_LLM_MAX_TOKENS", "1200")),
+            # Must exceed the worst-case generation time. A timeout shorter than
+            # generation is worse than useless: the client abandons the request
+            # but the server keeps generating it, so orphaned work steals
+            # capacity from the requests that follow.
+            llm_timeout=int(os.environ.get("GRAPH_MCP_LLM_TIMEOUT", "900")),
+            llm_disable_thinking=_env_flag("GRAPH_MCP_LLM_DISABLE_THINKING", True),
             chunk_words=int(os.environ.get("GRAPH_MCP_CHUNK_WORDS", "350")),
             chunk_overlap_words=int(os.environ.get("GRAPH_MCP_CHUNK_OVERLAP", "60")),
             entity_merge_threshold=float(
