@@ -1,10 +1,15 @@
 # Neo4j for graph-mcp — deployable as-is via Portainer (Stacks → Add stack →
 # Repository) or `docker compose up -d`.
 #
-# Only Neo4j is containerised. `graph-mcp` itself is an stdio MCP server that
-# the MCP client spawns on demand, and `graph-sync` is a batch job that needs
-# to reach both this database and an embedding endpoint — neither belongs in a
-# long-running stack. See README "Build plan and validation gates".
+# By default this starts Neo4j only. Desktop MCP clients spawn `graph-mcp`
+# themselves over stdio and need nothing else here.
+#
+# The optional `graph-mcp` service (profile: server) serves MCP over HTTP for
+# clients that CANNOT spawn a local process — an agent in another container.
+# Enable it with `--profile server`, or COMPOSE_PROFILES=server in Portainer.
+#
+# `graph-sync` is a batch job, not a service: it needs the markdown corpus and
+# an embedding endpoint, so it runs wherever the embedding model is.
 #
 # Required environment variable (set it in Portainer's stack env editor, or in
 # a .env beside this file):
@@ -73,9 +78,14 @@ services:
   #
   # Required alongside the Neo4j variables:
   #   GRAPH_MCP_AUTH_TOKEN   shared bearer token (`openssl rand -hex 32`)
-  #   KB_ROOT                host path of the Knowledge/ corpus
   #   EMBED_BASE_URL         embedding endpoint reachable FROM this container
   #                          — not 127.0.0.1 unless the model runs here too
+  #   AGENT_NETWORK          the MCP client's Docker network, if it is in
+  #                          another stack
+  #
+  # The corpus is deliberately NOT mounted: every tool queries Neo4j and none
+  # read files. Only graph-sync needs the notes, and it runs wherever the
+  # embedding model is.
   graph-mcp:
     profiles: ["server"]
     build: .
@@ -107,9 +117,6 @@ services:
       GRAPH_MCP_EMBED_DIM: "${EMBED_DIM:-4096}"
       # Stage gate: leave unset until the semantic pass has been validated.
       GRAPH_MCP_SEMANTIC_TOOLS: "${GRAPH_MCP_SEMANTIC_TOOLS:-}"
-    volumes:
-      # Read-only: this service never writes to the corpus.
-      - "${KB_ROOT:-./Knowledge}:/vault/Knowledge:ro"
     ports:
       # Leave unpublished if the client is a sibling container — it can reach
       # http://graph-mcp:8000/mcp over the compose network without this.

@@ -23,11 +23,10 @@ RUN uv sync --frozen
 ENV PATH="/app/.venv/bin:$PATH" \
     GRAPH_MCP_TRANSPORT=streamable-http \
     GRAPH_MCP_HTTP_HOST=0.0.0.0 \
-    GRAPH_MCP_HTTP_PORT=8000 \
-    GRAPH_MCP_KB_ROOT=/vault/Knowledge
+    GRAPH_MCP_HTTP_PORT=8000
 
-# Runs unprivileged. The corpus is mounted read-only: graph-mcp only ever
-# reads notes, and graph-sync (which also only reads them) is a separate job.
+# No corpus mount: every tool queries Neo4j and none read the notes. Only
+# graph-sync needs the markdown, and it runs alongside the embedding model.
 RUN useradd --uid 10001 --create-home graphmcp
 USER 10001
 
