@@ -100,15 +100,21 @@ dedup) and Stage 5 (automating before the pipeline is trustworthy).
 ### Stage 0 — Neo4j
 
 ```bash
-# with NEO4J_PASSWORD in the stack .env
-docker compose -f deploy/docker-compose.neo4j.yml up -d
+echo "NEO4J_PASSWORD=$(openssl rand -base64 24)" > .env
+docker compose up -d
 docker compose ps                      # healthy
-cypher-shell -u neo4j -p "$NEO4J_PASSWORD" "RETURN 1"
+docker compose exec neo4j cypher-shell -u neo4j -p "$NEO4J_PASSWORD" "RETURN 1"
 ```
 
-If `graph-mcp` runs on the same host, Bolt needs no published port at all.
-Otherwise bind it to a private interface only — see the binding note at the
-top of `deploy/docker-compose.neo4j.yml`.
+**Portainer:** Stacks → Add stack → Repository, point it at this repo. The
+root `docker-compose.yml` is the stack file; set `NEO4J_PASSWORD` (and
+`BOLT_BIND_ADDR`, if needed) in Portainer's environment-variables editor.
+
+Bolt publishes on `127.0.0.1` by default, which is correct when `graph-sync`
+and `graph-mcp` run on the same host as Neo4j. If they run elsewhere, set
+`BOLT_BIND_ADDR` to a **private** address — a VPN/WireGuard/Tailscale address
+or a LAN address. Never `0.0.0.0`, which would expose Bolt to every network
+the host can reach.
 
 **Gate:** container healthy, `RETURN 1` succeeds, and `uv run graph-sync
 status` reports counts rather than a connection error.

@@ -1,0 +1,60 @@
+# Neo4j for graph-mcp — deployable as-is via Portainer (Stacks → Add stack →
+# Repository) or `docker compose up -d`.
+#
+# Only Neo4j is containerised. `graph-mcp` itself is an stdio MCP server that
+# the MCP client spawns on demand, and `graph-sync` is a batch job that needs
+# to reach both this database and an embedding endpoint — neither belongs in a
+# long-running stack. See README "Build plan and validation gates".
+#
+# Required environment variable (set it in Portainer's stack env editor, or in
+# a .env beside this file):
+#
+#   NEO4J_PASSWORD   database password for the `neo4j` user
+#
+# Optional:
+#
+#   BOLT_BIND_ADDR   interface to publish Bolt on. Defaults to 127.0.0.1,
+#                    which is correct when graph-sync/graph-mcp run on this
+#                    same host. If they run elsewhere, set this to a PRIVATE
+#                    address — a VPN/WireGuard/Tailscale address or a LAN
+#                    address. Never 0.0.0.0: Bolt would then be exposed to
+#                    every network this host can reach.
+#   BROWSER_BIND_ADDR  interface for the Neo4j Browser UI. Defaults to
+#                    127.0.0.1; tunnel to it rather than publishing it.
+#   NEO4J_IMAGE      defaults to neo4j:5-community.
+
+services:
+  neo4j:
+    image: ${NEO4J_IMAGE:-neo4j:5-community}
+    container_name: neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in the stack environment}"
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL:-512m}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-2G}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-1G}
+      # 4096-dim vectors are large; this keeps the transaction that writes a
+      # full corpus of chunk embeddings from tripping the default limit.
+      NEO4J_db_memory_transaction_total_max: ${NEO4J_TX_MAX:-1G}
+    ports:
+      - "${BOLT_BIND_ADDR:-127.0.0.1}:7687:7687"
+      - "${BROWSER_BIND_ADDR:-127.0.0.1}:7474:7474"
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${NEO4J_MEM_LIMIT:-4g}
+    # Equal to mem_limit on purpose: without it the container spills into host
+    # swap instead of OOM-killing inside its own cgroup.
+    memswap_limit: ${NEO4J_MEM_LIMIT:-4g}
+
+volumes:
+  neo4j-data:
+  neo4j-logs:
