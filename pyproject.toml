@@ -1,0 +1,26 @@
+[project]
+name = "graph-mcp"
+version = "0.1.0"
+description = "Neo4j knowledge-graph index over a personal Knowledge/ markdown corpus, exposed over MCP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["mcp>=1.2.0", "neo4j>=5.20"]
+keywords = ["mcp", "neo4j", "knowledge-graph", "embeddings", "graphrag"]
+
+[project.urls]
+Homepage = "https://github.com/cao-jacky/graph-mcp"
+Issues = "https://github.com/cao-jacky/graph-mcp/issues"
+
+[project.optional-dependencies]
+semantic = ["anthropic>=0.40"]
+
+[project.scripts]
+graph-mcp = "graph_mcp.server:main"
+graph-sync = "graph_mcp.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/graph_mcp"]

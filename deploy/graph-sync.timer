@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly knowledge-graph rebuild
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+# The desktop is not always on at 04:30; catch up on the next boot instead of
+# silently skipping a day.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

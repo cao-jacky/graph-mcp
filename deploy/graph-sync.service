@@ -1,0 +1,23 @@
+# Stage 5 — automation. Install as a *user* unit on the machine that hosts the
+# embedding model (not necessarily the Neo4j host):
+#   sed -i "s|/path/to/graph-mcp|$PWD|g" deploy/graph-sync.service
+#   cp deploy/graph-sync.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now graph-sync.timer
+#
+# Do not enable this until Stages 1-4 have been run by hand enough times to
+# trust their behaviour on renames, deletions and malformed frontmatter.
+# Automating an unstable pipeline turns visible failures into silent corruption.
+
+[Unit]
+Description=Rebuild the knowledge graph from the Knowledge/ corpus
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/graph-mcp
+EnvironmentFile=/path/to/graph-mcp/.env
+# structural + embed only. The semantic pass stays manual: it is the
+# expensive, highest-variance stage and wants a human looking at its output.
+ExecStart=/usr/bin/uv run graph-sync all
+TimeoutStartSec=3600
