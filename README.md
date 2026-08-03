@@ -281,6 +281,34 @@ content leaves the machine. Entity dedup happens **before** insert — exact key
 match, then Qwen3 embedding similarity above
 `GRAPH_MCP_ENTITY_MERGE_THRESHOLD` (0.92) within the same entity type.
 
+#### Throughput
+
+Extraction dominates the run, and two settings govern it.
+
+`GRAPH_MCP_LLM_CONCURRENCY` (default 1) parallelises both across documents and
+across the windows of a single long document, with a shared cap so the two
+levels cannot multiply. Measured on a local llama.cpp: 1.79x at 4, 1.4x at 2.
+
+**Raising it is only safe if the server has the context to match.** Local
+servers commonly split one context budget across slots, so N concurrent
+requests each get `n_ctx/N` tokens. At `n_ctx=8192`, four-way concurrency
+leaves ~2048 tokens per request and every real note fails with `Context size
+has been exceeded` — while the same note succeeds serially. Budget roughly
+8192 tokens per concurrent request, and raise `n_ctx` before raising
+concurrency.
+
+Note that batched decoding changes floating-point accumulation order, so
+extraction stops being reproducible even at `temperature: 0` — the same note
+can yield a different entity set between runs. Set concurrency to 1 if you
+need determinism more than speed.
+
+**Reasoning models must have reasoning disabled.** Measured on a 28-word note,
+the model spent 2744 reasoning tokens to produce ~200 tokens of JSON: 93% of
+generation, 103s instead of 14s. `reasoning_effort: "none"` is sent for this;
+verify any change against `usage.completion_tokens_details.reasoning_tokens`
+rather than latency, because an ignored parameter still returns a valid
+response.
+
 **Gate:** inspect the extraction for 5–10 notes you know well before running
 at scale. Watch for systematic misses — bullet-heavy notes tend to yield fewer
 relations than prose. Check `find_related_entities` on a familiar entity for

@@ -17,6 +17,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -332,6 +333,18 @@ def _windows(doc: Document, max_words: int) -> list[str]:
     ]
 
 
+# Parallelism happens at two levels — several documents at once, and several
+# windows within one document — but the server's context is a single shared
+# budget. This semaphore caps TOTAL in-flight requests so the two levels
+# cannot multiply and blow past it ("Context size has been exceeded").
+_request_slots = threading.Semaphore(1)
+
+
+def _set_request_slots(n: int) -> None:
+    global _request_slots
+    _request_slots = threading.Semaphore(max(1, n))
+
+
 def extract_document(
     doc: Document, cfg: Settings, extract_words: int
 ) -> tuple[dict[str, dict], list[dict], str | None]:
@@ -341,14 +354,33 @@ def extract_document(
     thread-safe, so only this part is parallelised and every graph write stays
     on the main thread. Returns (entities, relations, error).
     """
-    llm = LLMClient(cfg)  # per-thread: it caches endpoint negotiation state
     entities: dict[str, dict] = {}
     relations: list[dict] = []
-    try:
-        for window in _windows(doc, extract_words):
-            result = llm.complete_json(
+    windows = _windows(doc, extract_words)
+
+    def fetch(window: str) -> dict:
+        # A client per call: it caches endpoint negotiation state and is not
+        # worth sharing across threads.
+        llm = LLMClient(cfg)
+        with _request_slots:
+            return llm.complete_json(
                 f"Note path: {doc.path}\nTitle: {doc.title}\n\n{window}"
             )
+
+    try:
+        # Windows are independent LLM calls, so a long note need not be
+        # processed one window at a time — a 25-window document would
+        # otherwise occupy one worker for over half an hour. Merging stays
+        # serial and order-independent.
+        if len(windows) > 1 and cfg.llm_concurrency > 1:
+            with ThreadPoolExecutor(
+                max_workers=min(len(windows), cfg.llm_concurrency)
+            ) as pool:
+                results = list(pool.map(fetch, windows))
+        else:
+            results = [fetch(w) for w in windows]
+
+        for result in results:
             for raw in result.get("entities", []) or []:
                 name = str(raw.get("name", "")).strip()
                 if not name:
@@ -385,6 +417,17 @@ def extract_document(
     except (urllib.error.URLError, TimeoutError, OSError, ValueError,
             KeyError, json.JSONDecodeError) as exc:
         return {}, [], f"{doc.path}: {exc.__class__.__name__}: {exc}"
+
+    # Keep the most-recurrent entities. Relations naming a dropped entity are
+    # discarded downstream, where unresolved endpoints are already filtered.
+    cap = cfg.max_entities_per_doc
+    if cap > 0 and len(entities) > cap:
+        keep = sorted(entities, key=lambda k: -entities[k]["count"])[:cap]
+        entities = {k: entities[k] for k in keep}
+        kept = set(keep)
+        relations = [
+            r for r in relations if r["source"] in kept and r["target"] in kept
+        ]
     return entities, relations, None
 
 
@@ -424,6 +467,8 @@ def sync_semantic(
         done: list[Document] = []
 
         workers = max(1, cfg.llm_concurrency)
+        # Cap total in-flight requests across both parallelism levels.
+        _set_request_slots(workers)
         for offset in range(0, len(pending), workers):
             # Time-boxing is checked between batches, never mid-document, so a
             # slice always ends on cleanly-watermarked boundaries.

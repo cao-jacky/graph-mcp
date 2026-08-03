@@ -42,6 +42,7 @@ class Settings:
     llm_timeout: int
     llm_disable_thinking: bool
     llm_concurrency: int
+    max_entities_per_doc: int
 
     chunk_words: int
     chunk_overlap_words: int
@@ -115,6 +116,15 @@ class Settings:
             # extraction stops being reproducible even at temperature 0 — the
             # same note can yield a different entity set between runs.
             llm_concurrency=int(os.environ.get("GRAPH_MCP_LLM_CONCURRENCY", "1")),
+            # The prompt caps entities per *window*, which does nothing for a
+            # long note: a 25-window document merged to 167 entities, enough to
+            # dominate the graph with one note's incidental mentions. This caps
+            # per *document*, after merging, keeping the entities that recur
+            # across windows — recurrence is the signal that something is
+            # central to the note rather than mentioned once in passing.
+            max_entities_per_doc=int(
+                os.environ.get("GRAPH_MCP_MAX_ENTITIES_PER_DOC", "20")
+            ),
             chunk_words=int(os.environ.get("GRAPH_MCP_CHUNK_WORDS", "350")),
             chunk_overlap_words=int(os.environ.get("GRAPH_MCP_CHUNK_OVERLAP", "60")),
             entity_merge_threshold=float(
