@@ -41,6 +41,7 @@ class Settings:
     llm_max_tokens: int
     llm_timeout: int
     llm_disable_thinking: bool
+    llm_concurrency: int
 
     chunk_words: int
     chunk_overlap_words: int
@@ -86,16 +87,34 @@ class Settings:
             ),
             llm_model=os.environ.get("GRAPH_MCP_LLM_MODEL", "qwen3.5-122b-a10b"),
             llm_api_key=os.environ.get("GRAPH_MCP_LLM_API_KEY", "lm-studio"),
-            # Extraction JSON for a normal note is a few hundred tokens. Without
-            # a cap, a reasoning model will happily spend thousands on a
-            # two-line note.
-            llm_max_tokens=int(os.environ.get("GRAPH_MCP_LLM_MAX_TOKENS", "1200")),
+            # Sized for the largest real extraction, not the typical one. A
+            # 606-word note already needs ~875 tokens, and a content-dense note
+            # exceeds 1200 — at which point the response truncates, the
+            # document is recorded as a failure, and it fails identically on
+            # every later run. The cap exists to bound runaway generation, not
+            # to be tight.
+            llm_max_tokens=int(os.environ.get("GRAPH_MCP_LLM_MAX_TOKENS", "4000")),
             # Must exceed the worst-case generation time. A timeout shorter than
             # generation is worse than useless: the client abandons the request
             # but the server keeps generating it, so orphaned work steals
             # capacity from the requests that follow.
             llm_timeout=int(os.environ.get("GRAPH_MCP_LLM_TIMEOUT", "900")),
             llm_disable_thinking=_env_flag("GRAPH_MCP_LLM_DISABLE_THINKING", True),
+            # Parallel extraction requests. Serial by default because raising
+            # it is only safe once the server has the context to match.
+            #
+            # Local servers commonly split one context budget across slots
+            # (llama.cpp with kv_unified), so N concurrent requests each get
+            # n_ctx/N tokens. At n_ctx=8192, 4-way concurrency leaves ~2048
+            # per request and any real note fails with "Context size has been
+            # exceeded" — while the same note succeeds serially. Budget
+            # roughly 8192 tokens per concurrent request.
+            #
+            # Measured: 1.79x throughput at 4, 1.4x at 2. Note that batched
+            # decoding also changes floating-point accumulation order, so
+            # extraction stops being reproducible even at temperature 0 — the
+            # same note can yield a different entity set between runs.
+            llm_concurrency=int(os.environ.get("GRAPH_MCP_LLM_CONCURRENCY", "1")),
             chunk_words=int(os.environ.get("GRAPH_MCP_CHUNK_WORDS", "350")),
             chunk_overlap_words=int(os.environ.get("GRAPH_MCP_CHUNK_OVERLAP", "60")),
             entity_merge_threshold=float(

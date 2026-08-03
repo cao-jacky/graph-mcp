@@ -17,6 +17,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from .config import Settings, settings
@@ -52,7 +53,11 @@ Return ONLY a JSON object, no prose and no markdown fence, of the shape:
 }
 
 Rules:
-- Extract only entities that genuinely matter to this note, not every noun.
+- Extract at most 12 entities: the ones this note is genuinely ABOUT, that
+  someone would search for by name. Fewer is better than more.
+- Do NOT extract generic technology nouns (OS, VM, API, database, server,
+  container, model) unless the note is specifically about that thing.
+- Do NOT extract the knowledge base, the note itself, or note-taking tools.
 - Use the most canonical name you can (e.g. "Neo4j", not "the neo4j database").
 - `source` and `target` in relations MUST exactly match a `name` in entities.
 - `type` MUST be exactly one of: works_on, depends_on, part_of, uses, supersedes, contradicts, created_by, related_to.
@@ -264,6 +269,22 @@ class LLMClient:
             try:
                 body = self._request(prompt, RESPONSE_FORMATS[self._format_index])
             except urllib.error.HTTPError as exc:
+                detail = ""
+                try:
+                    detail = exc.read().decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001 - diagnostics only
+                    pass
+                # Not a payload problem, so degrading response_format wastes
+                # three more slow requests and still fails. Say what is wrong.
+                if "context size" in detail.lower() or "context length" in detail.lower():
+                    raise RuntimeError(
+                        "Model context exceeded. With GRAPH_MCP_LLM_CONCURRENCY="
+                        f"{self.cfg.llm_concurrency}, the server's context is split "
+                        "across that many slots, so each request gets a fraction of "
+                        "it. Either raise the model's context length (n_ctx) to at "
+                        "least concurrency x 8192, lower GRAPH_MCP_LLM_CONCURRENCY, "
+                        "or lower GRAPH_MCP_LLM_MAX_TOKENS."
+                    ) from exc
                 if exc.code == 400 and self._thinking_kwarg:
                     # Endpoint rejects chat_template_kwargs; drop it and retry
                     # before blaming the response_format.
@@ -311,6 +332,62 @@ def _windows(doc: Document, max_words: int) -> list[str]:
     ]
 
 
+def extract_document(
+    doc: Document, cfg: Settings, extract_words: int
+) -> tuple[dict[str, dict], list[dict], str | None]:
+    """Run the LLM over one document. Pure network + parsing, no Neo4j.
+
+    Isolated so it can run in a worker thread: the Neo4j session is not
+    thread-safe, so only this part is parallelised and every graph write stays
+    on the main thread. Returns (entities, relations, error).
+    """
+    llm = LLMClient(cfg)  # per-thread: it caches endpoint negotiation state
+    entities: dict[str, dict] = {}
+    relations: list[dict] = []
+    try:
+        for window in _windows(doc, extract_words):
+            result = llm.complete_json(
+                f"Note path: {doc.path}\nTitle: {doc.title}\n\n{window}"
+            )
+            for raw in result.get("entities", []) or []:
+                name = str(raw.get("name", "")).strip()
+                if not name:
+                    continue
+                etype = str(raw.get("type", "concept")).strip().lower()
+                if etype not in ENTITY_TYPES:
+                    etype = "concept"
+                key = entity_key(name)
+                if not key:
+                    continue
+                slot = entities.setdefault(
+                    key, {"name": name, "type": etype, "aliases": set(), "count": 0}
+                )
+                slot["count"] += 1
+                for alias in raw.get("aliases", []) or []:
+                    if str(alias).strip():
+                        slot["aliases"].add(str(alias).strip())
+            for raw in result.get("relations", []) or []:
+                source = entity_key(str(raw.get("source", "")))
+                target = entity_key(str(raw.get("target", "")))
+                if not source or not target or source == target:
+                    continue
+                rtype = str(raw.get("type", "related_to")).strip().lower()
+                if rtype not in RELATION_TYPES:
+                    rtype = "related_to"
+                try:
+                    confidence = float(raw.get("confidence", 0.5))
+                except (TypeError, ValueError):
+                    confidence = 0.5
+                relations.append({
+                    "source": source, "target": target, "type": rtype,
+                    "confidence": max(0.0, min(1.0, confidence)), "path": doc.path,
+                })
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError,
+            KeyError, json.JSONDecodeError) as exc:
+        return {}, [], f"{doc.path}: {exc.__class__.__name__}: {exc}"
+    return entities, relations, None
+
+
 def sync_semantic(
     cfg: Settings | None = None,
     docs: list[Document] | None = None,
@@ -346,139 +423,111 @@ def sync_semantic(
         session.run(CLEAR_DOC_SEMANTICS, paths=[d.path for d in pending])
         done: list[Document] = []
 
-        for index, doc in enumerate(pending, 1):
-            # Time-boxing is checked between documents, never mid-document, so
-            # a slice always ends on a cleanly-watermarked boundary.
+        workers = max(1, cfg.llm_concurrency)
+        for offset in range(0, len(pending), workers):
+            # Time-boxing is checked between batches, never mid-document, so a
+            # slice always ends on cleanly-watermarked boundaries.
             if max_seconds is not None and time.time() - started >= max_seconds:
                 report.stopped_early = True
                 break
+            batch = pending[offset : offset + workers]
             if progress:
                 print(
-                    f"  [{index}/{len(pending)}] {doc.path[:60]}",
+                    f"  [{offset + 1}-{offset + len(batch)}/{len(pending)}] "
+                    f"{batch[0].path[:52]}",
                     end="\r",
                     flush=True,
                 )
-            entities: dict[str, dict] = {}
-            relations: list[dict] = []
-            try:
-                for window in _windows(doc, extract_words):
-                    result = llm.complete_json(
-                        f"Note path: {doc.path}\nTitle: {doc.title}\n\n{window}"
-                    )
-                    for raw in result.get("entities", []) or []:
-                        name = str(raw.get("name", "")).strip()
-                        if not name:
-                            continue
-                        etype = str(raw.get("type", "concept")).strip().lower()
-                        if etype not in ENTITY_TYPES:
-                            etype = "concept"
-                        key = entity_key(name)
-                        if not key:
-                            continue
-                        slot = entities.setdefault(
-                            key,
-                            {"name": name, "type": etype, "aliases": set(), "count": 0},
+
+            # Only the LLM calls are parallel. Everything below — embedding,
+            # dedup lookups, writes, watermarking — stays on this thread,
+            # because the Neo4j session is not thread-safe and dedup must see
+            # entities written by earlier documents in this run.
+            if workers == 1:
+                results = [extract_document(batch[0], cfg, extract_words)]
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    results = list(
+                        pool.map(
+                            lambda d: extract_document(d, cfg, extract_words), batch
                         )
-                        slot["count"] += 1
-                        for alias in raw.get("aliases", []) or []:
-                            if str(alias).strip():
-                                slot["aliases"].add(str(alias).strip())
-                    for raw in result.get("relations", []) or []:
-                        source = entity_key(str(raw.get("source", "")))
-                        target = entity_key(str(raw.get("target", "")))
-                        if not source or not target or source == target:
-                            continue
-                        rtype = str(raw.get("type", "related_to")).strip().lower()
-                        if rtype not in RELATION_TYPES:
-                            rtype = "related_to"
-                        try:
-                            confidence = float(raw.get("confidence", 0.5))
-                        except (TypeError, ValueError):
-                            confidence = 0.5
-                        relations.append(
+                    )
+
+            for doc, (entities, relations, error) in zip(batch, results):
+                if error:
+                    report.failures.append(error)
+                    continue
+
+                if not entities:
+                    session.run(
+                        MARK_EXTRACTED, path=doc.path, content_hash=doc.content_hash
+                    )
+                    done.append(doc)
+                    continue
+
+                # Dedup before insert: exact key, then vector similarity.
+                keys = list(entities)
+                vectors = embedder.embed(
+                    [f"{entities[k]['name']} ({entities[k]['type']})" for k in keys]
+                )
+                resolved: dict[str, str] = {}
+                rows = []
+                for key, vector in zip(keys, vectors):
+                    slot = entities[key]
+                    match = session.run(
+                        SIMILAR_ENTITY,
+                        embedding=vector,
+                        threshold=cfg.entity_merge_threshold,
+                        type=slot["type"],
+                    ).single()
+                    if match and match["key"] != key:
+                        resolved[key] = match["key"]
+                        report.entities_merged += 1
+                        rows.append(
                             {
-                                "source": source,
-                                "target": target,
-                                "type": rtype,
-                                "confidence": max(0.0, min(1.0, confidence)),
-                                "path": doc.path,
+                                "key": match["key"],
+                                "name": match["name"],
+                                "type": slot["type"],
+                                "aliases": sorted(slot["aliases"] | {slot["name"]}),
+                                "embedding": vector,
                             }
                         )
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError,
-                    KeyError, json.JSONDecodeError) as exc:
-                report.failures.append(f"{doc.path}: {exc.__class__.__name__}: {exc}")
-                continue
+                    else:
+                        resolved[key] = key
+                        report.entities_new += 1
+                        rows.append(
+                            {
+                                "key": key,
+                                "name": slot["name"],
+                                "type": slot["type"],
+                                "aliases": sorted(slot["aliases"]),
+                                "embedding": vector,
+                            }
+                        )
 
-            if not entities:
-                session.run(
-                    MARK_EXTRACTED, path=doc.path, content_hash=doc.content_hash
-                )
+                session.run(UPSERT_ENTITIES, rows=rows)
+                mention_rows = [
+                    {"path": doc.path, "key": resolved[k], "count": entities[k]["count"]}
+                    for k in keys
+                ]
+                session.run(UPSERT_MENTIONS, rows=mention_rows)
+                report.mentions += len(mention_rows)
+
+                relation_rows = [
+                    {**r, "source": resolved.get(r["source"]), "target": resolved.get(r["target"])}
+                    for r in relations
+                ]
+                # Drop relations naming an entity the model never declared.
+                relation_rows = [
+                    r for r in relation_rows
+                    if r["source"] and r["target"] and r["source"] != r["target"]
+                ]
+                if relation_rows:
+                    session.run(UPSERT_RELATIONS, rows=relation_rows)
+                    report.relations += len(relation_rows)
+
+                session.run(MARK_EXTRACTED, path=doc.path, content_hash=doc.content_hash)
                 done.append(doc)
-                continue
-
-            # Dedup before insert: exact key, then vector similarity.
-            keys = list(entities)
-            vectors = embedder.embed(
-                [f"{entities[k]['name']} ({entities[k]['type']})" for k in keys]
-            )
-            resolved: dict[str, str] = {}
-            rows = []
-            for key, vector in zip(keys, vectors):
-                slot = entities[key]
-                match = session.run(
-                    SIMILAR_ENTITY,
-                    embedding=vector,
-                    threshold=cfg.entity_merge_threshold,
-                    type=slot["type"],
-                ).single()
-                if match and match["key"] != key:
-                    resolved[key] = match["key"]
-                    report.entities_merged += 1
-                    rows.append(
-                        {
-                            "key": match["key"],
-                            "name": match["name"],
-                            "type": slot["type"],
-                            "aliases": sorted(slot["aliases"] | {slot["name"]}),
-                            "embedding": vector,
-                        }
-                    )
-                else:
-                    resolved[key] = key
-                    report.entities_new += 1
-                    rows.append(
-                        {
-                            "key": key,
-                            "name": slot["name"],
-                            "type": slot["type"],
-                            "aliases": sorted(slot["aliases"]),
-                            "embedding": vector,
-                        }
-                    )
-
-            session.run(UPSERT_ENTITIES, rows=rows)
-            mention_rows = [
-                {"path": doc.path, "key": resolved[k], "count": entities[k]["count"]}
-                for k in keys
-            ]
-            session.run(UPSERT_MENTIONS, rows=mention_rows)
-            report.mentions += len(mention_rows)
-
-            relation_rows = [
-                {**r, "source": resolved.get(r["source"]), "target": resolved.get(r["target"])}
-                for r in relations
-            ]
-            # Drop relations naming an entity the model never declared.
-            relation_rows = [
-                r for r in relation_rows
-                if r["source"] and r["target"] and r["source"] != r["target"]
-            ]
-            if relation_rows:
-                session.run(UPSERT_RELATIONS, rows=relation_rows)
-                report.relations += len(relation_rows)
-
-            session.run(MARK_EXTRACTED, path=doc.path, content_hash=doc.content_hash)
-            done.append(doc)
 
         report.documents_extracted = len(done)
 
